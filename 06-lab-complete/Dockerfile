@@ -1,18 +1,29 @@
-# ============================================================
-# TODO (tiêu chí 1): viết lại thành Dockerfile production
-#   • Multi-stage build: stage builder cài dependencies, stage runtime chỉ copy kết quả
-#   • Base image slim (vd python:3.11-slim) và chạy bằng user non-root
-#   • Có HEALTHCHECK gọi GET /health
-#   • Image cuối < 500 MB
-#   • CMD lắng nghe theo biến PORT (mặc định 8000) và uvicorn phải là PID 1
-#     (exec form, hoặc `sh -c "exec uvicorn ..."`) để nhận SIGTERM khi `docker stop`
-#
-# Bản dưới đây build và chạy được nhưng CHƯA đạt yêu cầu nào ở trên.
-# ============================================================
-FROM python:3.11
+# Stage 1: builder — cài dependencies vào /install
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Stage 2: runtime — image gọn, user non-root, HEALTHCHECK, PID 1 uvicorn
+FROM python:3.11-slim AS runtime
+
+RUN useradd --create-home --shell /bin/bash appuser
 
 WORKDIR /app
-COPY . .
-RUN pip install -r requirements.txt
+COPY --from=builder /install /usr/local
+COPY --chown=appuser:appuser app ./app
+COPY --chown=appuser:appuser utils ./utils
 
-CMD uvicorn app.main:app --host 0.0.0.0 --port 8000
+USER appuser
+
+ENV PORT=8000 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"PORT\", \"8000\")}/health', timeout=3)" || exit 1
+
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2"]
